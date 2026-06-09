@@ -476,14 +476,47 @@ func relativeSongPath(song Song) (string, error) {
 		p = fallbackSongPath(song)
 	}
 
-	p = filepath.FromSlash(p)
-	p = filepath.Clean(p)
+	return sanitizeRelativePath(p, song.Path)
+}
 
-	if filepath.IsAbs(p) || p == "." || p == ".." || strings.HasPrefix(p, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("unsafe path from server: %q", song.Path)
+func sanitizeRelativePath(p string, original string) (string, error) {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return "", fmt.Errorf("empty path from server: %q", original)
 	}
 
-	return p, nil
+	// Navidrome paths normally use forward slashes. Treat backslashes as
+	// separators too so Windows-style source paths cannot smuggle unsafe names.
+	p = strings.ReplaceAll(p, "\\", "/")
+
+	if strings.HasPrefix(p, "/") || looksLikeWindowsAbsPath(p) {
+		return "", fmt.Errorf("unsafe absolute path from server: %q", original)
+	}
+
+	parts := strings.Split(p, "/")
+	cleaned := make([]string, 0, len(parts))
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || part == "." {
+			continue
+		}
+		if part == ".." {
+			return "", fmt.Errorf("unsafe path from server: %q", original)
+		}
+
+		cleaned = append(cleaned, cleanPathPart(part))
+	}
+
+	if len(cleaned) == 0 {
+		return "", fmt.Errorf("unsafe path from server: %q", original)
+	}
+
+	return filepath.Join(cleaned...), nil
+}
+
+func looksLikeWindowsAbsPath(p string) bool {
+	return len(p) >= 3 && ((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) && p[1] == ':' && p[2] == '/'
 }
 
 func albumDirectoryFromRelativeSongPath(rel string) (string, error) {
@@ -619,13 +652,22 @@ func fallbackSongPath(song Song) string {
 func cleanPathPart(s string) string {
 	s = strings.TrimSpace(s)
 
-	replacer := strings.NewReplacer(
-		"/", "_",
-		"\\", "_",
-		string(os.PathSeparator), "_",
-	)
+	var b strings.Builder
+	b.Grow(len(s))
 
-	s = replacer.Replace(s)
+	for _, r := range s {
+		switch {
+		case r < 0x20 || r == 0x7f:
+			b.WriteRune('_')
+		case strings.ContainsRune(`<>:"/\|?*`, r):
+			b.WriteRune('_')
+		default:
+			b.WriteRune(r)
+		}
+	}
+
+	s = strings.TrimSpace(b.String())
+	s = strings.Trim(s, ".")
 
 	if s == "" || s == "." || s == ".." {
 		return "_"
